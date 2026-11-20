@@ -1,0 +1,257 @@
+openapi: 3.0.3
+info:
+  title: Plata Quote Service
+  version: 1.0.0
+  description: Asynchronous updates for currency exchange rates.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/v1/quotes/updates:
+    post:
+      operationId: createQuoteUpdate
+      summary: Queue a currency rate update
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: Reuse a key with the same normalized pair to retrieve the original update ID and its current status.
+          schema:
+            type: string
+            maxLength: 255
+            pattern: '^[!-~]{1,255}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [base_currency, quote_currency]
+              properties:
+                base_currency:
+                  $ref: '#/components/schemas/CurrencyInput'
+                quote_currency:
+                  $ref: '#/components/schemas/CurrencyInput'
+            example:
+              base_currency: EUR
+              quote_currency: MXN
+      responses:
+        '202':
+          description: Update queued or an existing update returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [update_id, status]
+                properties:
+                  update_id:
+                    type: string
+                    format: uuid
+                  status:
+                    $ref: '#/components/schemas/UpdateStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: The idempotency key already belongs to a different pair.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request body exceeds 4 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Content-Type must be application/json.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/quotes/updates/{id}:
+    get:
+      operationId: getQuoteUpdate
+      summary: Read an update and its result
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Current update status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Update'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/quotes/latest:
+    get:
+      operationId: getLatestQuote
+      summary: Read the newest successful quote by source timestamp
+      parameters:
+        - in: query
+          name: base
+          required: true
+          schema:
+            $ref: '#/components/schemas/CurrencyInput'
+        - in: query
+          name: quote
+          required: true
+          schema:
+            $ref: '#/components/schemas/CurrencyInput'
+      responses:
+        '200':
+          description: Last successful quote for the ordered pair.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /health/live:
+    get:
+      operationId: live
+      summary: Check that the process responds
+      responses:
+        '200':
+          $ref: '#/components/responses/Healthy'
+  /health/ready:
+    get:
+      operationId: ready
+      summary: Check that PostgreSQL responds
+      responses:
+        '200':
+          $ref: '#/components/responses/Healthy'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+components:
+  schemas:
+    CurrencyInput:
+      type: string
+      description: Normalized to uppercase with surrounding whitespace removed. Supports USD, EUR and MXN. The two currencies must be different.
+      example: EUR
+    Currency:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      example: EUR
+    UpdateStatus:
+      type: string
+      enum: [pending, completed, failed]
+      description: An update stays pending until the worker saves a result.
+    Update:
+      type: object
+      required: [update_id, base_currency, quote_currency, status, rate, updated_at, created_at, error]
+      properties:
+        update_id:
+          type: string
+          format: uuid
+        base_currency:
+          $ref: '#/components/schemas/Currency'
+        quote_currency:
+          $ref: '#/components/schemas/Currency'
+        status:
+          $ref: '#/components/schemas/UpdateStatus'
+        rate:
+          type: string
+          nullable: true
+          description: Exact decimal string when completed.
+          example: '20.123456789'
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Source date at midnight UTC, or the time of retrieval if the source provides no date.
+        created_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+          nullable: true
+          description: Public error message when failed.
+    Quote:
+      type: object
+      required: [base_currency, quote_currency, rate, updated_at]
+      properties:
+        base_currency:
+          $ref: '#/components/schemas/Currency'
+        quote_currency:
+          $ref: '#/components/schemas/Currency'
+        rate:
+          type: string
+          description: Exact decimal string.
+          example: '20.123456789'
+        updated_at:
+          type: string
+          format: date-time
+          description: Source date at midnight UTC, or the time of retrieval if the source provides no date.
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: invalid_currency
+            message:
+              type: string
+              example: use two different supported currency codes
+  responses:
+    BadRequest:
+      description: Invalid request body, currencies, update ID or idempotency key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No matching update or successful quote was found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: An unexpected server error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unavailable:
+      description: The database check or request timed out, or the database is unavailable during the readiness check.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Healthy:
+      description: Check passed.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status:
+                type: string
+                enum: [ok]
